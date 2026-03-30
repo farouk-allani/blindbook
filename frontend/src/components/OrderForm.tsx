@@ -10,7 +10,7 @@ export default function OrderForm() {
   const [price, setPrice] = useState('')
   const [toast, setToast] = useState<{ side: string; hash: string } | null>(null)
 
-  const { writeContract, data: hash, isPending, reset } = useWriteContract()
+  const { writeContract, data: hash, isPending } = useWriteContract()
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash })
 
   // Show toast + reset form on success
