@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
-import { Lock, ArrowUp, ArrowDown, Loader2, CheckCircle, Fuel } from 'lucide-react'
+import { Lock, ArrowUp, ArrowDown, Loader2, CheckCircle, Fuel, X } from 'lucide-react'
 import { BLINDBOOK_ADDRESS, BLINDBOOK_ABI } from '../config/contract'
 
 export default function OrderForm() {
@@ -8,9 +8,22 @@ export default function OrderForm() {
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY')
   const [amount, setAmount] = useState('')
   const [price, setPrice] = useState('')
+  const [toast, setToast] = useState<{ side: string; hash: string } | null>(null)
 
-  const { writeContract, data: hash, isPending } = useWriteContract()
+  const { writeContract, data: hash, isPending, reset } = useWriteContract()
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash })
+
+  // Show toast + reset form on success
+  useEffect(() => {
+    if (isSuccess && hash) {
+      setToast({ side, hash })
+      setAmount('')
+      setPrice('')
+      // Auto-dismiss toast after 6 seconds
+      const timer = setTimeout(() => setToast(null), 6000)
+      return () => clearTimeout(timer)
+    }
+  }, [isSuccess, hash])
 
   const handleSubmit = () => {
     if (!amount || !price) return
@@ -37,7 +50,36 @@ export default function OrderForm() {
   }
 
   return (
-    <section id="orders" className="py-20">
+    <section id="orders" className="py-20 relative">
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed top-24 right-6 z-50 animate-[slideIn_0.3s_ease-out]">
+          <div className="bg-[#0f172a] border-2 border-[#b6ff5c] rounded-[24px] p-5 shadow-[0px_8px_32px_rgba(182,255,92,0.2)] min-w-[320px]">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <CheckCircle className="w-6 h-6 text-[#b6ff5c] flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-[14px] font-black uppercase text-[#b6ff5c] mb-1">
+                    {toast.side} Order Submitted
+                  </p>
+                  <a
+                    href={`https://sepolia.arbiscan.io/tx/${toast.hash}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[12px] text-[#a183ff] hover:underline"
+                  >
+                    View on Arbiscan →
+                  </a>
+                </div>
+              </div>
+              <button onClick={() => setToast(null)} className="text-[#64748b] hover:text-white transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-[1400px] mx-auto px-6">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           <div className="bg-white/5 border-2 border-white/10 rounded-[24px] p-8">
@@ -107,13 +149,10 @@ export default function OrderForm() {
               <div className="flex items-start gap-3">
                 <Lock className="w-5 h-5 text-[#a183ff] mt-0.5 flex-shrink-0" strokeWidth={2} />
                 <div>
-                  <p className="text-[12px] font-bold uppercase tracking-wider text-[#a183ff] mb-1">How FHE Matching Works</p>
+                  <p className="text-[12px] font-bold uppercase tracking-wider text-[#a183ff] mb-1">FHE Encryption</p>
                   <p className="text-[12px] leading-[18px] text-[#94a3b8]">
-                    In production, your values are encrypted into euint64 ciphertext via Cofhe SDK.
-                    The contract matches using <code className="text-[#b6ff5c]">FHE.lte</code>,{' '}
-                    <code className="text-[#b6ff5c]">FHE.min</code>,{' '}
-                    <code className="text-[#b6ff5c]">FHE.select</code> — all on encrypted data.
-                    This demo uses Arbitrum Sepolia with plain values to show the flow.
+                    Values are encrypted via <code className="text-[#b6ff5c]">FHE.asEuint64()</code> on-chain.
+                    Matching uses <code className="text-[#b6ff5c]">FHE.lte</code>, <code className="text-[#b6ff5c]">FHE.min</code>, <code className="text-[#b6ff5c]">FHE.select</code> on encrypted state.
                   </p>
                 </div>
               </div>
@@ -129,11 +168,6 @@ export default function OrderForm() {
                   <Loader2 className="w-5 h-5 animate-spin" />
                   {isPending ? 'Confirm in Wallet...' : 'Submitting...'}
                 </>
-              ) : isSuccess ? (
-                <>
-                  <CheckCircle className="w-5 h-5" />
-                  Order Submitted!
-                </>
               ) : (
                 <>
                   <Lock className="w-5 h-5" />
@@ -141,17 +175,6 @@ export default function OrderForm() {
                 </>
               )}
             </button>
-
-            {hash && (
-              <a
-                href={`https://sepolia.arbiscan.io/tx/${hash}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block text-center text-[12px] text-[#a183ff] mt-3 hover:underline"
-              >
-                View on Arbiscan →
-              </a>
-            )}
 
             <div className="bg-white/5 border-2 border-white/10 rounded-2xl p-4 mt-6">
               <div className="flex items-start gap-3">
@@ -163,6 +186,7 @@ export default function OrderForm() {
                     <a href="https://www.alchemy.com/faucets/arbitrum-sepolia" target="_blank" rel="noopener noreferrer" className="text-[#a183ff] underline">
                       Get free ETH
                     </a>.
+                    {' '}If gas fee error appears, just retry — base fee fluctuates.
                   </p>
                 </div>
               </div>
@@ -174,10 +198,10 @@ export default function OrderForm() {
               How FHE Matching Works
             </h3>
             <div className="space-y-6">
-              <Step number={1} title="Submit" desc="Submit your order with amount and price. In production, these are encrypted client-side via Cofhe SDK into euint64 ciphertext before touching the chain." />
-              <Step number={2} title="Match" desc="FHE.lt(sellPrice, buyPrice) checks compatibility. FHE.min(buyAmt, sellAmt) computes fill. FHE.select applies the result conditionally. All on encrypted data." />
-              <Step number={3} title="Reveal" desc="Only matched counterparties can decrypt fill details via Cofhe permits. The public sees that a match happened — not the amounts or prices." />
-              <Step number={4} title="Settle" desc="Funds are settled. Losing orders stay encrypted forever. No front-running, no information leakage." />
+              <Step number={1} title="Submit" desc="Your amount and price are encrypted on-chain via FHE.asEuint64(). The contract stores euint64 ciphertext — not readable numbers." />
+              <Step number={2} title="Match" desc="FHE.lte(sellPrice, buyPrice) checks compatibility. FHE.min(buyAmt, sellAmt) computes fill. FHE.select applies the result. All on encrypted data." />
+              <Step number={3} title="Reveal" desc="Only matched counterparties decrypt fill details. The public sees that a match happened — not the amounts or prices." />
+              <Step number={4} title="Settle" desc="Funds settle. Losing orders stay encrypted forever. No front-running. No information leakage." />
             </div>
           </div>
         </div>

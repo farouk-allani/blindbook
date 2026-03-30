@@ -1,4 +1,4 @@
-export const BLINDBOOK_ADDRESS = '0x0f41Dc668024F5C98B9835EbEcb63Cf9ad2E4e0a' as const
+export const BLINDBOOK_ADDRESS = '0xD9d08922C95aB27D9fDbe7833DE2b68799c2c310' as const
 
 export const BLINDBOOK_ABI = [
   {
@@ -23,7 +23,10 @@ export const BLINDBOOK_ABI = [
     type: 'function',
   },
   {
-    inputs: [{ name: 'matchId', type: 'uint256' }],
+    inputs: [
+      { name: 'matchId', type: 'uint256' },
+      { name: 'fillQty', type: 'uint64' },
+    ],
     name: 'revealFill',
     outputs: [],
     stateMutability: 'nonpayable',

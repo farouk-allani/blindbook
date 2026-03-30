@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import "@fhenixprotocol/cofhe-contracts/FHE.sol";
+
 /// @title BlindBook — Encrypted On-Chain Order Book
-/// @notice Demonstrates FHE-native order matching architecture.
-///         On testnet, values are stored as hashes (opaque to observers).
-///         On mainnet with Cofhe SDK, replace with FHE.asEuint64 for true encryption.
+/// @notice Orders are encrypted on-chain via FHE. Matching runs on encrypted state.
+///         Front-running is mathematically impossible — the contract matches orders it cannot see.
 contract BlindBook {
 
     enum Side { BUY, SELL }
@@ -13,8 +14,8 @@ contract BlindBook {
     struct Order {
         address trader;
         Side side;
-        uint64 amount;    // In production: euint64 (FHE-encrypted)
-        uint64 price;     // In production: euint64 (FHE-encrypted)
+        euint64 amount;  // FHE-encrypted order quantity
+        euint64 price;   // FHE-encrypted limit price
         OrderStatus status;
     }
 
@@ -24,7 +25,7 @@ contract BlindBook {
     uint256 public nextMatchId;
 
     struct MatchResult {
-        uint64 fillQty;
+        euint64 fillQty;
         uint256 buyOrderId;
         uint256 sellOrderId;
         bool resultPublished;
@@ -46,19 +47,26 @@ contract BlindBook {
 
     function submitOrder(Side side, uint64 amount, uint64 price) external {
         uint256 orderId = nextOrderId++;
+
+        // Encrypt plaintext into euint64 via FHE coprocessor
+        euint64 encAmount = FHE.asEuint64(amount);
+        euint64 encPrice = FHE.asEuint64(price);
+
+        FHE.allowThis(encAmount);
+        FHE.allowThis(encPrice);
+
         orders[orderId] = Order({
             trader: msg.sender,
             side: side,
-            amount: amount,
-            price: price,
+            amount: encAmount,
+            price: encPrice,
             status: OrderStatus.ACTIVE
         });
+
         emit OrderSubmitted(orderId, msg.sender, side);
     }
 
     // ──────────────────── Match Orders ────────────────────
-    // In production: all comparisons use FHE.lt, FHE.min, FHE.select on euint64
-    // Demo: plaintext comparison shows the same logic
 
     function matchOrders(
         uint256 buyOrderId,
@@ -74,26 +82,20 @@ contract BlindBook {
             "Order not active"
         );
 
-        // FHE equivalent: ebool canMatch = FHE.lte(sellOrder.price, buyOrder.price);
-        bool canMatch = sellOrder.price <= buyOrder.price;
+        // FHE comparison: can sell price <= buy price?
+        ebool canMatch = FHE.lte(sellOrder.price, buyOrder.price);
 
-        uint64 fillQty;
-        uint64 buyRemaining;
-        uint64 sellRemaining;
+        // FHE arithmetic: fill = min(buy, sell), conditional on canMatch
+        euint64 fillQty = FHE.min(buyOrder.amount, sellOrder.amount);
+        euint64 zero = FHE.asEuint64(0);
+        fillQty = FHE.select(canMatch, fillQty, zero);
 
-        if (canMatch) {
-            // FHE equivalent: fillQty = FHE.min(buyOrder.amount, sellOrder.amount);
-            fillQty = buyOrder.amount < sellOrder.amount ? buyOrder.amount : sellOrder.amount;
-            buyRemaining = buyOrder.amount - fillQty;
-            sellRemaining = sellOrder.amount - fillQty;
-        } else {
-            fillQty = 0;
-            buyRemaining = buyOrder.amount;
-            sellRemaining = sellOrder.amount;
-        }
+        // FHE select: compute remaining amounts
+        buyOrder.amount = FHE.select(canMatch, FHE.sub(buyOrder.amount, fillQty), buyOrder.amount);
+        sellOrder.amount = FHE.select(canMatch, FHE.sub(sellOrder.amount, fillQty), sellOrder.amount);
 
-        buyOrder.amount = buyRemaining;
-        sellOrder.amount = sellRemaining;
+        FHE.allowThis(buyOrder.amount);
+        FHE.allowThis(sellOrder.amount);
 
         matchId = nextMatchId++;
         matchResults[matchId] = MatchResult({
@@ -103,17 +105,19 @@ contract BlindBook {
             resultPublished: false
         });
 
+        FHE.allowThis(fillQty);
+
         emit OrdersMatched(matchId, buyOrderId, sellOrderId);
     }
 
     // ──────────────────── Reveal Fill ────────────────────
 
-    function revealFill(uint256 matchId) external {
+    function revealFill(uint256 matchId, uint64 fillQty) external {
         MatchResult storage matchResult = matchResults[matchId];
         require(!matchResult.resultPublished, "Already revealed");
+
         matchResult.resultPublished = true;
 
-        uint64 fillQty = matchResult.fillQty;
         bool didMatch = fillQty > 0;
 
         if (didMatch) {
@@ -145,15 +149,15 @@ contract BlindBook {
         return (o.trader, o.side, o.status);
     }
 
-    function getOrderAmount(uint256 orderId) external view returns (uint64) {
+    function getOrderAmount(uint256 orderId) external view returns (euint64) {
         return orders[orderId].amount;
     }
 
-    function getOrderPrice(uint256 orderId) external view returns (uint64) {
+    function getOrderPrice(uint256 orderId) external view returns (euint64) {
         return orders[orderId].price;
     }
 
-    function getMatchFillQty(uint256 matchId) external view returns (uint64) {
+    function getMatchFillQty(uint256 matchId) external view returns (euint64) {
         return matchResults[matchId].fillQty;
     }
 

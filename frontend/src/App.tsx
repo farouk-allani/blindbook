@@ -24,7 +24,7 @@ function App() {
           </p>
           <div className="flex justify-center gap-6 mt-6">
             <a
-              href="https://sepolia.arbiscan.io/address/0x0f41Dc668024F5C98B9835EbEcb63Cf9ad2E4e0a"
+              href="https://sepolia.arbiscan.io/address/0xD9d08922C95aB27D9fDbe7833DE2b68799c2c310"
               target="_blank"
               rel="noopener noreferrer"
               className="text-[12px] font-bold uppercase tracking-wider text-[#a183ff] hover:text-[#b6ff5c] transition-colors duration-200"

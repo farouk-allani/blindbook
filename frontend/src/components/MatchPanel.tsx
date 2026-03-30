@@ -6,6 +6,7 @@ import { BLINDBOOK_ADDRESS, BLINDBOOK_ABI } from '../config/contract'
 export default function MatchPanel() {
   const [buyId, setBuyId] = useState('')
   const [sellId, setSellId] = useState('')
+  const [revealFillQty, setRevealFillQty] = useState('')
 
   const { writeContract: writeMatch, data: matchHash, isPending: isMatchPending } = useWriteContract()
   const { writeContract: writeReveal, data: revealHash, isPending: isRevealPending } = useWriteContract()
@@ -30,13 +31,12 @@ export default function MatchPanel() {
   }
 
   const handleReveal = () => {
-    const matchCount = Number(totalMatches || 0)
-    if (matchCount === 0) return
+    if (!revealFillQty) return
     writeReveal({
       address: BLINDBOOK_ADDRESS,
       abi: BLINDBOOK_ABI,
       functionName: 'revealFill',
-      args: [BigInt(matchCount - 1)],
+      args: [BigInt(Number(totalMatches || 1) - 1), BigInt(revealFillQty)],
     })
   }
 
@@ -100,11 +100,17 @@ export default function MatchPanel() {
             </div>
 
             <p className="text-[14px] text-[#94a3b8] mb-6">
-              After matching, the fill quantity is determined. Reveal it to update order statuses.
-              In production, only matched parties can decrypt via Cofhe permits.
+              After matching, enter the fill quantity to reveal. In production, this value is decrypted
+              from the encrypted match result via Cofhe SDK.
             </p>
 
-            <button onClick={handleReveal} disabled={isRevealPending || isRevealConfirming || !totalMatches || Number(totalMatches) === 0}
+            <div className="mb-6">
+              <label className="text-[14px] font-bold uppercase tracking-wide text-[#94a3b8] block mb-2">Fill Quantity</label>
+              <input type="number" value={revealFillQty} onChange={(e) => setRevealFillQty(e.target.value)} placeholder="e.g. 50"
+                className="w-full px-4 py-4 bg-white border-2 border-[#e2e8f0] rounded-2xl text-[#0f172a] text-[16px] placeholder:text-[#94a3b8] focus:outline-none focus:border-[#b6ff5c] transition-colors duration-200" />
+            </div>
+
+            <button onClick={handleReveal} disabled={!revealFillQty || isRevealPending || isRevealConfirming}
               className="w-full bg-white border-2 border-[#e2e8f0] text-[#0f172a] font-bold text-[14px] uppercase py-4 rounded-2xl hover:border-[#cbd5e1] hover:bg-[#fafafa] transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
               {isRevealPending || isRevealConfirming ? (
                 <><Loader2 className="w-5 h-5 animate-spin" />Revealing...</>
