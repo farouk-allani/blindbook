@@ -1,4 +1,7 @@
-# BlindBook — Encrypted On-Chain Order Book
+# BlindBook  Encrypted On-Chain Order Book
+
+<img width="503" height="324" alt="logo" src="https://github.com/user-attachments/assets/4100e3ec-167d-443c-9fb5-caabd7ea87ed" />
+
 
 ## The Problem: Every Order Book Is a Front-Running Machine
 
