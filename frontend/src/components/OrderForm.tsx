@@ -1,38 +1,91 @@
 import { useState, useEffect } from 'react'
 import { useAccount, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
 import { Lock, ArrowUp, ArrowDown, Loader2, CheckCircle, Fuel, X } from 'lucide-react'
+import { Encryptable } from '@cofhe/sdk'
 import { BLINDBOOK_ADDRESS, BLINDBOOK_ABI } from '../config/contract'
+import { useCofheClient } from '../hooks/useCofheClient'
+
+type EncryptPhase = null | 'initTfhe' | 'fetchKeys' | 'pack' | 'prove' | 'verify'
+
+const PHASE_LABEL: Record<Exclude<EncryptPhase, null>, string> = {
+  initTfhe: 'Initializing FHE keys…',
+  fetchKeys: 'Fetching public keys…',
+  pack: 'Packing ciphertext…',
+  prove: 'Generating ZK proof…',
+  verify: 'Verifying with CoFHE…',
+}
+
+// Arb Sepolia base fees move between estimate and submission; show a plain retry hint.
+function friendlyTxError(err: unknown): string | null {
+  if (!err) return null
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/max fee per gas less than block base fee|maxFeePerGas/i.test(msg)) {
+    return 'Arbitrum Sepolia base fee moved between estimate and submission. Just click again — it almost always works on retry.'
+  }
+  if (/user rejected|user denied/i.test(msg)) {
+    return 'Transaction rejected in wallet.'
+  }
+  return msg.split('\n')[0].slice(0, 240)
+}
 
 export default function OrderForm() {
   const { isConnected } = useAccount()
+  const { client: cofheClient, ready: cofheReady, state: cofheState, retry: retryCofhe } = useCofheClient()
   const [side, setSide] = useState<'BUY' | 'SELL'>('BUY')
   const [amount, setAmount] = useState('')
   const [price, setPrice] = useState('')
   const [toast, setToast] = useState<{ side: string; hash: string } | null>(null)
+  const [encryptPhase, setEncryptPhase] = useState<EncryptPhase>(null)
+  const [encryptError, setEncryptError] = useState<string | null>(null)
 
-  const { writeContract, data: hash, isPending } = useWriteContract()
+  const { writeContract, data: hash, isPending, error: writeError, reset: resetWrite } = useWriteContract()
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({ hash })
 
-  // Show toast + reset form on success
   useEffect(() => {
     if (isSuccess && hash) {
       setToast({ side, hash })
       setAmount('')
       setPrice('')
-      // Auto-dismiss toast after 6 seconds
       const timer = setTimeout(() => setToast(null), 6000)
       return () => clearTimeout(timer)
     }
   }, [isSuccess, hash])
 
-  const handleSubmit = () => {
-    if (!amount || !price) return
-    writeContract({
-      address: BLINDBOOK_ADDRESS,
-      abi: BLINDBOOK_ABI,
-      functionName: 'submitOrder',
-      args: [side === 'BUY' ? 0 : 1, BigInt(amount), BigInt(price)],
-    })
+  const isEncrypting = encryptPhase !== null
+  const busy = isEncrypting || isPending || isConfirming
+
+  const handleSubmit = async () => {
+    if (!amount || !price || !cofheReady) return
+    setEncryptError(null)
+    resetWrite()
+    try {
+      // Encrypt amount and price in the browser. The values are packed into
+      // a ZK proof by the cofhe SDK — plaintext never enters calldata.
+      const [encAmount, encPrice] = await cofheClient
+        .encryptInputs([Encryptable.uint64(BigInt(amount)), Encryptable.uint64(BigInt(price))])
+        .onStep((step) => setEncryptPhase(step as EncryptPhase))
+        .execute()
+      setEncryptPhase(null)
+
+      // The SDK types signature as `string`; the ABI tuple expects `0x${string}`.
+      // The value is already a hex string — cast at the call site.
+      const toInEuint = (e: typeof encAmount) => ({
+        ctHash: e.ctHash,
+        securityZone: e.securityZone,
+        utype: e.utype,
+        signature: e.signature as `0x${string}`,
+      })
+
+      writeContract({
+        address: BLINDBOOK_ADDRESS,
+        abi: BLINDBOOK_ABI,
+        functionName: 'submitOrder',
+        args: [side === 'BUY' ? 0 : 1, toInEuint(encAmount), toInEuint(encPrice)],
+      })
+    } catch (err) {
+      setEncryptPhase(null)
+      setEncryptError(err instanceof Error ? err.message : 'Encryption failed')
+    }
   }
 
   if (!isConnected) {
@@ -149,24 +202,75 @@ export default function OrderForm() {
               <div className="flex items-start gap-3">
                 <Lock className="w-5 h-5 text-[#a183ff] mt-0.5 flex-shrink-0" strokeWidth={2} />
                 <div>
-                  <p className="text-[12px] font-bold uppercase tracking-wider text-[#a183ff] mb-1">FHE Encryption</p>
+                  <p className="text-[12px] font-bold uppercase tracking-wider text-[#a183ff] mb-1">Client-side FHE Encryption</p>
                   <p className="text-[12px] leading-[18px] text-[#94a3b8]">
-                    Values are encrypted via <code className="text-[#b6ff5c]">FHE.asEuint64()</code> on-chain.
-                    Matching uses <code className="text-[#b6ff5c]">FHE.lte</code>, <code className="text-[#b6ff5c]">FHE.min</code>, <code className="text-[#b6ff5c]">FHE.select</code> on encrypted state.
+                    Values are encrypted in your browser via <code className="text-[#b6ff5c]">cofhejs</code> before the tx is sent.
+                    The contract receives ciphertext + ZK proof — <strong className="text-white">plaintext never enters calldata</strong>.
+                    Matching runs on encrypted state via <code className="text-[#b6ff5c]">FHE.lte</code>, <code className="text-[#b6ff5c]">FHE.min</code>, <code className="text-[#b6ff5c]">FHE.select</code>.
                   </p>
                 </div>
               </div>
             </div>
 
+            {encryptError && (
+              <div className="bg-[rgba(239,68,68,0.1)] border-2 border-[rgba(239,68,68,0.3)] rounded-2xl p-4 mb-4">
+                <p className="text-[12px] text-[#fca5a5]">Encryption failed: {encryptError}</p>
+              </div>
+            )}
+
+            {friendlyTxError(writeError) && (
+              <div className="bg-[rgba(239,68,68,0.1)] border-2 border-[rgba(239,68,68,0.3)] rounded-2xl p-4 mb-4">
+                <p className="text-[12px] text-[#fca5a5] leading-[18px]">{friendlyTxError(writeError)}</p>
+              </div>
+            )}
+
+            {cofheState.status === 'error' && (
+              <div className="bg-[rgba(239,68,68,0.1)] border-2 border-[rgba(239,68,68,0.3)] rounded-2xl p-4 mb-4">
+                <p className="text-[12px] font-bold uppercase tracking-wider text-[#fca5a5] mb-1">FHE client failed to connect</p>
+                <p className="text-[11px] text-[#fca5a5] leading-[16px] mb-2 break-words">{cofheState.message}</p>
+                <button
+                  onClick={() => retryCofhe()}
+                  className="text-[12px] font-bold uppercase text-[#fca5a5] underline hover:text-white"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+
             <button
               onClick={handleSubmit}
-              disabled={!amount || !price || isPending || isConfirming}
+              disabled={!amount || !price || busy || !cofheReady}
               className="w-full bg-[#b6ff5c] text-[#0f172a] font-black text-[16px] uppercase py-4 rounded-[24px] hover:bg-[#a5ed4b] transition-colors duration-200 shadow-[0px_4px_12px_rgba(182,255,92,0.3)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
-              {isPending || isConfirming ? (
+              {isEncrypting ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  {isPending ? 'Confirm in Wallet...' : 'Submitting...'}
+                  {PHASE_LABEL[encryptPhase!]}
+                </>
+              ) : isPending ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Confirm in Wallet...
+                </>
+              ) : isConfirming ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Submitting...
+                </>
+              ) : cofheState.status === 'connecting' ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Connecting FHE client…
+                </>
+              ) : cofheState.status === 'waiting-wallet' || cofheState.status === 'idle' ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  Waiting for wallet…
+                </>
+              ) : cofheState.status === 'error' ? (
+                <>
+                  <Lock className="w-5 h-5" />
+                  FHE client unavailable
                 </>
               ) : (
                 <>
@@ -198,7 +302,7 @@ export default function OrderForm() {
               How FHE Matching Works
             </h3>
             <div className="space-y-6">
-              <Step number={1} title="Submit" desc="Your amount and price are encrypted on-chain via FHE.asEuint64(). The contract stores euint64 ciphertext — not readable numbers." />
+              <Step number={1} title="Submit" desc="Your amount and price are encrypted in your browser via cofhejs before the tx is sent. The contract receives ciphertext + ZK proof — plaintext never appears in calldata, so there is nothing to front-run." />
               <Step number={2} title="Match" desc="FHE.lte(sellPrice, buyPrice) checks compatibility. FHE.min(buyAmt, sellAmt) computes fill. FHE.select applies the result. All on encrypted data." />
               <Step number={3} title="Reveal" desc="Only matched counterparties decrypt fill details. The public sees that a match happened — not the amounts or prices." />
               <Step number={4} title="Settle" desc="Funds settle. Losing orders stay encrypted forever. No front-running. No information leakage." />

@@ -1,15 +1,10 @@
 import { http, createConfig } from 'wagmi'
 import { arbitrumSepolia } from 'wagmi/chains'
-import { injected, walletConnect } from 'wagmi/connectors'
-
-const projectId = 'blindbook-demo'
+import { injected } from 'wagmi/connectors'
 
 export const wagmiConfig = createConfig({
   chains: [arbitrumSepolia],
-  connectors: [
-    injected(),
-    walletConnect({ projectId }),
-  ],
+  connectors: [injected()],
   transports: {
     [arbitrumSepolia.id]: http('https://sepolia-rollup.arbitrum.io/rpc'),
   },

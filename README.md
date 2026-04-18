@@ -1,7 +1,8 @@
-# BlindBook  Encrypted On-Chain Order Book
+# BlindBook — Encrypted On-Chain Order Book
 
 <img width="503" height="324" alt="logo" src="https://github.com/user-attachments/assets/4100e3ec-167d-443c-9fb5-caabd7ea87ed" />
 
+**Fhenix Buildathon 2026 · Arbitrum Sepolia · CoFHE**
 
 ## The Problem: Every Order Book Is a Front-Running Machine
 
@@ -13,127 +14,124 @@ AMMs (Uniswap) solved liquidity but created sandwich attacks. Intent protocols (
 
 ## The Solution: Orders Nobody Can See
 
-BlindBook is an order book where **order amounts and prices are encrypted on-chain** using Fully Homomorphic Encryption (FHE). The contract matches orders it cannot see. Front-running becomes mathematically impossible — you cannot front-run an order you cannot read.
+BlindBook is an order book where **order amounts and prices are encrypted end-to-end** using Fully Homomorphic Encryption (FHE). Orders are encrypted in the submitter's browser, the contract receives only ciphertext + ZK proof, and matching runs on encrypted state. Nothing about the order — amount, price, or whether it will match — is ever visible on the wire or in calldata.
 
-### How It Works
+### End-to-End Flow
 
 ```
-1. Buyer submits encrypted order:  (amount=100 ETH, price=$3200) → encrypted
-2. Seller submits encrypted order: (amount=50 ETH, price=$3100) → encrypted
-3. Anyone triggers matching:
-   - FHE.lt(sellPrice, buyPrice) → can these orders match? (encrypted boolean)
-   - FHE.min(buyAmount, sellAmount) → fill quantity (encrypted)
-   - FHE.select(canMatch, fillAmount, 0) → conditional fill (encrypted)
-4. Result: trade executes, fill quantity is 50 ETH, but NEITHER amount NOR price is ever revealed publicly
-5. Only the buyer and seller can decrypt their fill details via Cofhe permits
+1. Browser:   cofhejs encrypts (amount, price) → InEuint64 (ciphertext + ZK proof)
+2. Wallet:    submits tx. Calldata contains only ciphertext + proof — no plaintext.
+3. Contract:  FHE.asEuint64(InEuint64) verifies the proof and imports as euint64
+4. Matching:  FHE.lte(sellPrice, buyPrice) → can match?  (encrypted boolean)
+              FHE.min(buyAmount, sellAmount) → fillQty   (encrypted)
+              FHE.select(canMatch, fillQty, 0) → applied conditionally
+              FHE.sub(amount, fillQty) → remaining
+5. Reveal:    counterparties surface plaintext fillQty to settle
 ```
 
 ### FHE Operations Used
 
-| Operation | Purpose |
-|-----------|---------|
-| `FHE.lt(sellPrice, buyPrice)` | Can these orders match? Returns encrypted boolean |
-| `FHE.min(buyAmount, sellAmount)` | Fill the smaller quantity |
-| `FHE.sub(amount, fillQty)` | Remaining unfilled amount |
-| `FHE.select(condition, a, b)` | Conditional update based on encrypted boolean |
+| Operation | Layer | Purpose |
+|---|---|---|
+| `encryptInputs([Encryptable.uint64(…)])` | Browser (cofhejs) | Pack + prove ZK, return `InEuint64` |
+| `FHE.asEuint64(InEuint64)` | Contract | Verify proof, import as `euint64` |
+| `FHE.lte(sellPrice, buyPrice)` | Contract | Can match? Encrypted boolean |
+| `FHE.min(buyAmount, sellAmount)` | Contract | Fill the smaller quantity |
+| `FHE.select(canMatch, a, b)` | Contract | Conditional update on encrypted boolean |
+| `FHE.sub(amount, fillQty)` | Contract | Remaining unfilled amount |
 
-These are the exact primitives from Fhenix's own FHE.sol library. No workarounds, no compromises.
+These are the primitives from `@fhenixprotocol/cofhe-contracts`. No workarounds, no compromises.
 
 ## Why FHE Is Genuinely Required
 
 | Technology | Can It Build This? |
-|-----------|-------------------|
+|---|---|
 | **ZK** | Proves an order was valid, but the order is still visible on-chain |
 | **MPC** | Requires a trusted committee to hold order data |
 | **TEE** | Hardware trust assumption — single point of failure |
-| **FHE** | **The contract evaluates "sell price < buy price" without seeing either value. Only option.** |
+| **FHE** | **The contract evaluates "sell price ≤ buy price" without seeing either value. Only option.** |
 
 ## Architecture
 
 ```
 BlindBook.sol
-├── submitOrder(side, encryptedAmount, encryptedPrice)
-│   └── Stores encrypted order on-chain via FHE.asEuint64()
-├── matchOrders(buyOrderId, sellOrderId)
-│   ├── FHE.lt(sellPrice, buyPrice) → canMatch
+├── submitOrder(side, InEuint64 amount, InEuint64 price)
+│   └── FHE.asEuint64(input) verifies client-side proof, imports as euint64
+├── matchOrders(buyOrderId, sellOrderId) → matchId
+│   ├── FHE.lte(sellPrice, buyPrice) → canMatch
 │   ├── FHE.min(buyAmount, sellAmount) → fillQty
-│   ├── FHE.select(canMatch, FHE.sub(amount, fillQty), amount) → remaining
-│   └── FHE.allow(fillQty, trader) → only counterparties can decrypt
-├── revealFill(orderId, ctHash, plaintext, signature)
-│   └── FHE.publishDecryptResult() → verify and publish settlement
+│   ├── FHE.select(canMatch, fillQty, 0) → conditional fill
+│   └── FHE.select + FHE.sub → updated remaining amounts
+├── revealFill(matchId, fillQty) → cooperative reveal (see Limitations)
 ├── cancelOrder(orderId) → trader cancels their own order
-├── getOrderAmount(orderId) → encrypted handle (ACL-protected)
-└── getOrderPrice(orderId) → encrypted handle (ACL-protected)
+└── getOrderAmount / getOrderPrice / getMatchFillQty → encrypted handles
 ```
 
-**1 Solidity contract. 4 FHE operations. 210 lines of code.** Deployed and tested on local Fhenix mock environment.
+**1 Solidity contract, ~170 lines. Deployed on Arbitrum Sepolia.**
 
 ## What's Different From Existing Submissions
 
 | Project | What It Does | BlindBook Difference |
-|---------|-------------|---------------------|
-| **PrivaBid** | Sealed-bid auctions (highest bid wins, one-time sale) | Continuous order book with bid/ask matching — completely different primitive |
-| **BlindDeal** | Two-party negotiation matching | Multi-party order book with price-time priority |
-| **Every AMM** | Publishes bonding curve → sandwich attacks trivial | No curve, no visible orders, no sandwich attacks possible |
+|---|---|---|
+| **PrivaBid** | Sealed-bid auctions (highest bid wins, one-time sale) | Continuous order book with bid/ask matching — different primitive |
+| **BlindDeal** | Two-party negotiation matching | Multi-party order book |
+| **AMMs** | Publishes bonding curve → sandwich attacks trivial | No curve, no visible orders, no sandwich attacks possible |
 
-**BlindBook is not "an auction with encryption." It's a new trading primitive that didn't exist before FHE.**
+BlindBook is a new trading primitive that didn't exist before FHE.
 
-## Why Judges Will Love This
+## Known Limitations (Stated Up Front)
 
-1. **Empty category**: No order book or DEX submission exists. Every other team is building lending, voting, or auctions.
+Being explicit about what this currently is and isn't — the buildathon judging rubric weights Technical Execution, so the gaps deserve to be named rather than hidden:
 
-2. **Institutional relevance**: "We will not trade on a transparent order book" — every institutional trader. BlindBook is the first order book they could actually use.
+1. **Matching is off-chain-driven**: `matchOrders(buyId, sellId)` requires a caller to propose the pair. This is a centralization vector; a permissionless matching auction is wave 3/4 work.
+2. **`revealFill` is cooperative, not proven**: the plaintext `fillQty` is currently trusted on reveal. Replacing this with a decryption oracle handshake is the wave 3 priority.
+3. **No settlement**: orders don't move tokens yet. FHERC-20 settlement and escrow lands in wave 3.
+4. **FHE gas cost**: viable for the demo flow on Arb Sepolia today; not yet viable for a production-volume book.
 
-3. **MEV elimination**: Directly addresses the "$500M MEV problem" from the buildathon brief. Front-running is not reduced — it's mathematically undefined.
+Wave 2 closed the privacy-architecture gap (plaintext in calldata). Waves 3+ close the remaining trust gaps on a correct foundation.
 
-4. **Technical depth**: FHE.lt, FHE.min, FHE.select chaining — demonstrates advanced FHE patterns, not just "encrypt a number."
+## Buildathon Waves
 
-5. **Fhenix ecosystem value**: This is infrastructure the entire ecosystem needs. Every DEX, every NFT marketplace, every liquidation protocol can integrate encrypted order books.
+### Wave 1 — Concept + Architecture + Contract (Done)
+- Core contract matching on encrypted state via CoFHE
+- Deployed on Arbitrum Sepolia
+- Frontend + tests + architecture doc
 
-## Buildathon Wave Plan
+### Wave 2 — Client-Side Encryption (Done)
+- `submitOrder` takes `InEuint64` instead of plaintext `uint64` — plaintext never enters calldata
+- `cofhejs` encryption in-browser with per-step progress UI (Init TFHE → Fetch Keys → Pack → Prove → Verify)
+- Redeployed to Arbitrum Sepolia with new address
+- Calldata-privacy regression test added; 11/11 tests passing
 
-### Wave 1 (Now) — Concept + Architecture + Core Contract
-- Smart contract deployed on Arbitrum Sepolia: `0xD9d08922C95aB27D9fDbe7833DE2b68799c2c310`
-- 20/20 tests passing (order submission, FHE matching, settlement, cancellation, privacy)
-- FHE matching logic verified in mock environment with plaintext assertions
-- Architecture documentation
-- This submission
+### Wave 3 (Planned)
+- Proven reveal via CoFHE decrypt oracle (removes the cooperative-trust gap)
+- FHERC-20 settlement and escrow
+- Multi-order partial fills
 
-### Wave 2 (April 6) — Working Prototype
-- React frontend with Cofhe SDK integration on Sepolia
-- React frontend with Cofhe SDK integration
-- End-to-end: submit encrypted order → match → verify encrypted result
-
-### Wave 3 (April 8 – May 8) — Full Feature Set
-- Multi-order matching (scan book for best match)
-- Partial fills (orders can fill partially across multiple matches)
-- FHERC20 integration for confidential settlement
-- Order book visualization (shows order existence without revealing amounts)
-
-### Wave 4–5 (May 11 – June 1) — Production
-- Gas optimization
-- Multiple trading pairs
-- API for protocol integrations
+### Wave 4–5 (Planned)
+- Permissionless matching auction
+- Gas optimization, multiple trading pairs
 - Mainnet deployment preparation
 
 ## Post-Buildathon: Real Revenue
 
 - **Trading fees**: 0.1-0.3% per fill (standard DEX model)
-- **Infrastructure licensing**: Other protocols integrate BlindBook contracts as their matching engine
-- **Institutional onboarding**: First encrypted order book that hedge funds can use
-- **No bootstrapping required**: Orders create their own liquidity. No LPs, no market makers needed for MVP.
+- **Infrastructure licensing**: other protocols integrate BlindBook as their matching engine
+- **Institutional onboarding**: first encrypted order book hedge funds can use
+- **No bootstrapping required**: orders create their own liquidity — no LPs or market makers needed for MVP
 
 ## Team
 
-I'm a blockchain developer, DeFi security researcher (Aave/Bonzo liquidation analysis), and AI agent builder (YieldMind — 4 autonomous agents). I operate Quest Machine, a platform with thousands of users and hundreds of thousands of quest completions. I've seen how transparent on-chain data creates exploitable patterns. BlindBook is the fix.
+Blockchain developer, DeFi security researcher (Aave/Bonzo liquidation analysis), and AI agent builder (YieldMind — 4 autonomous agents). Operator of Quest Machine, a platform with thousands of users and hundreds of thousands of quest completions. Built BlindBook because transparent on-chain order data creates exploitable patterns that will keep institutional capital off-chain indefinitely.
 
 ## Links
 
-- **Deployed Contract**: [0xD9d08922C95aB27D9fDbe7833DE2b68799c2c310](https://sepolia.arbiscan.io/address/0xD9d08922C95aB27D9fDbe7833DE2b68799c2c310) on Arbitrum Sepolia
-- **Source**: `contracts/BlindBook.sol` — 240 lines, fully commented
-- **Tests**: `test/BlindBook.test.ts` — 20 tests, all passing
-- **Frontend**: `frontend/index.html` — demo UI
+- **Deployed Contract (wave 2)**: [`0x9f63726454c6571955b0c17300ace7f9fb5C3F36`](https://sepolia.arbiscan.io/address/0x9f63726454c6571955b0c17300ace7f9fb5C3F36) on Arbitrum Sepolia
+- **Contract source**: `contracts/BlindBook.sol`
+- **Tests**: `test/BlindBook.test.ts` — 11/11 passing, including a calldata-privacy regression
+- **Frontend**: `frontend/` — React + wagmi + `@cofhe/sdk/web`
+- **Submission**: [`SUBMISSION.md`](SUBMISSION.md)
 
 ---
 
-*"Every order book in crypto is a front-running machine. BlindBook makes front-running mathematically impossible. Not with better incentives. With cryptography."*
+*"Every order book in crypto is a front-running machine. BlindBook makes front-running mathematically undefined — not with better incentives, with cryptography."*

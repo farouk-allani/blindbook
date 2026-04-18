@@ -3,13 +3,29 @@ import { useWriteContract, useWaitForTransactionReceipt, useReadContract } from 
 import { Zap, Loader2, CheckCircle, Unlock } from 'lucide-react'
 import { BLINDBOOK_ADDRESS, BLINDBOOK_ABI } from '../config/contract'
 
+// Arbitrum Sepolia base fees move between estimate and submission, so wagmi's
+// maxFeePerGas occasionally lands a few wei below the current baseFee. Surface
+// a plain "retry" message instead of a raw RPC error.
+function friendlyTxError(err: unknown): string | null {
+  if (!err) return null
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/max fee per gas less than block base fee|maxFeePerGas/i.test(msg)) {
+    return 'Arbitrum Sepolia base fee moved between estimate and submission. Just click again — it almost always works on retry.'
+  }
+  if (/user rejected|user denied/i.test(msg)) {
+    return 'Transaction rejected in wallet.'
+  }
+  // Keep it short for unknown errors
+  return msg.split('\n')[0].slice(0, 240)
+}
+
 export default function MatchPanel() {
   const [buyId, setBuyId] = useState('')
   const [sellId, setSellId] = useState('')
   const [revealFillQty, setRevealFillQty] = useState('')
 
-  const { writeContract: writeMatch, data: matchHash, isPending: isMatchPending } = useWriteContract()
-  const { writeContract: writeReveal, data: revealHash, isPending: isRevealPending } = useWriteContract()
+  const { writeContract: writeMatch, data: matchHash, isPending: isMatchPending, error: matchError, reset: resetMatch } = useWriteContract()
+  const { writeContract: writeReveal, data: revealHash, isPending: isRevealPending, error: revealError, reset: resetReveal } = useWriteContract()
 
   const { isLoading: isMatchConfirming, isSuccess: isMatchSuccess } = useWaitForTransactionReceipt({ hash: matchHash })
   const { isLoading: isRevealConfirming, isSuccess: isRevealSuccess } = useWaitForTransactionReceipt({ hash: revealHash })
@@ -22,6 +38,7 @@ export default function MatchPanel() {
 
   const handleMatch = () => {
     if (!buyId || !sellId) return
+    resetMatch()
     writeMatch({
       address: BLINDBOOK_ADDRESS,
       abi: BLINDBOOK_ABI,
@@ -32,6 +49,7 @@ export default function MatchPanel() {
 
   const handleReveal = () => {
     if (!revealFillQty) return
+    resetReveal()
     writeReveal({
       address: BLINDBOOK_ADDRESS,
       abi: BLINDBOOK_ABI,
@@ -39,6 +57,9 @@ export default function MatchPanel() {
       args: [BigInt(Number(totalMatches || 1) - 1), BigInt(revealFillQty)],
     })
   }
+
+  const matchErrMsg = friendlyTxError(matchError)
+  const revealErrMsg = friendlyTxError(revealError)
 
   return (
     <section id="match" className="py-20">
@@ -91,6 +112,12 @@ export default function MatchPanel() {
               <a href={`https://sepolia.arbiscan.io/tx/${matchHash}`} target="_blank" rel="noopener noreferrer"
                 className="block text-center text-[12px] text-[#a183ff] mt-3 hover:underline">View on Arbiscan →</a>
             )}
+
+            {matchErrMsg && (
+              <div className="mt-4 bg-[rgba(239,68,68,0.1)] border-2 border-[rgba(239,68,68,0.3)] rounded-2xl p-4">
+                <p className="text-[12px] text-[#fca5a5] leading-[18px]">{matchErrMsg}</p>
+              </div>
+            )}
           </div>
 
           <div className="bg-white/5 border-2 border-white/10 rounded-[24px] p-8">
@@ -124,6 +151,12 @@ export default function MatchPanel() {
             {revealHash && (
               <a href={`https://sepolia.arbiscan.io/tx/${revealHash}`} target="_blank" rel="noopener noreferrer"
                 className="block text-center text-[12px] text-[#a183ff] mt-3 hover:underline">View on Arbiscan →</a>
+            )}
+
+            {revealErrMsg && (
+              <div className="mt-4 bg-[rgba(239,68,68,0.1)] border-2 border-[rgba(239,68,68,0.3)] rounded-2xl p-4">
+                <p className="text-[12px] text-[#fca5a5] leading-[18px]">{revealErrMsg}</p>
+              </div>
             )}
           </div>
         </div>

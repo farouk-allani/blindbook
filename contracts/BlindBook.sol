@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import "@fhenixprotocol/cofhe-contracts/FHE.sol";
+import {InEuint64} from "@fhenixprotocol/cofhe-contracts/ICofhe.sol";
 
 /// @title BlindBook — Encrypted On-Chain Order Book
 /// @notice Orders are encrypted on-chain via FHE. Matching runs on encrypted state.
@@ -45,10 +46,13 @@ contract BlindBook {
 
     // ──────────────────── Submit Order ────────────────────
 
-    function submitOrder(Side side, uint64 amount, uint64 price) external {
+    /// @notice Submit an order with client-side encrypted amount and price.
+    /// @dev Inputs are InEuint64 (ciphertext + proof). Plaintext never enters calldata,
+    ///      so orders are opaque in the mempool and unfront-runnable.
+    function submitOrder(Side side, InEuint64 calldata amount, InEuint64 calldata price) external {
         uint256 orderId = nextOrderId++;
 
-        // Encrypt plaintext into euint64 via FHE coprocessor
+        // Verify the client-produced ciphertext+proof and import as euint64
         euint64 encAmount = FHE.asEuint64(amount);
         euint64 encPrice = FHE.asEuint64(price);
 

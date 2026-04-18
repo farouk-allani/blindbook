@@ -1,11 +1,29 @@
-export const BLINDBOOK_ADDRESS = '0xD9d08922C95aB27D9fDbe7833DE2b68799c2c310' as const
+export const BLINDBOOK_ADDRESS = '0x9f63726454c6571955b0c17300ace7f9fb5C3F36' as const
 
 export const BLINDBOOK_ABI = [
   {
     inputs: [
       { name: 'side', type: 'uint8' },
-      { name: 'amount', type: 'uint64' },
-      { name: 'price', type: 'uint64' },
+      {
+        name: 'amount',
+        type: 'tuple',
+        components: [
+          { name: 'ctHash', type: 'uint256' },
+          { name: 'securityZone', type: 'uint8' },
+          { name: 'utype', type: 'uint8' },
+          { name: 'signature', type: 'bytes' },
+        ],
+      },
+      {
+        name: 'price',
+        type: 'tuple',
+        components: [
+          { name: 'ctHash', type: 'uint256' },
+          { name: 'securityZone', type: 'uint8' },
+          { name: 'utype', type: 'uint8' },
+          { name: 'signature', type: 'bytes' },
+        ],
+      },
     ],
     name: 'submitOrder',
     outputs: [],

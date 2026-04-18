@@ -1,7 +1,6 @@
 import hre from "hardhat";
 import { expect } from "chai";
-import { CofheClient } from "@cofhe/sdk";
-import { Encryptable } from "@cofhe/sdk";
+import { CofheClient, Encryptable } from "@cofhe/sdk";
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 
 describe("BlindBook", function () {
@@ -14,6 +13,14 @@ describe("BlindBook", function () {
   const Side = { BUY: 0, SELL: 1 };
   const Status = { ACTIVE: 0, FILLED: 1, CANCELLED: 2 };
 
+  // Encrypt an (amount, price) pair client-side and return the InEuint64-shaped tuple
+  async function encryptOrder(client: CofheClient, amount: bigint, price: bigint) {
+    const [encAmount, encPrice] = await client
+      .encryptInputs([Encryptable.uint64(amount), Encryptable.uint64(price)])
+      .execute();
+    return { encAmount, encPrice };
+  }
+
   beforeEach(async function () {
     [buyer, seller] = await hre.ethers.getSigners();
     buyerClient = await hre.cofhe.createClientWithBatteries(buyer);
@@ -25,41 +32,44 @@ describe("BlindBook", function () {
   });
 
   describe("Order Submission", function () {
-    it("should submit a buy order and encrypt values via FHE", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 5000)).wait();
+    it("should submit a buy order with client-side encrypted inputs", async function () {
+      const { encAmount, encPrice } = await encryptOrder(buyerClient, 100n, 5000n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, encAmount, encPrice)).wait();
+
       const [trader, side, status] = await blindBook.getOrderInfo(0);
       expect(trader).to.equal(buyer.address);
       expect(side).to.equal(Side.BUY);
       expect(status).to.equal(Status.ACTIVE);
     });
 
-    it("should store encrypted amount via FHE.asEuint64", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 5000)).wait();
+    it("should store the imported encrypted amount without seeing plaintext", async function () {
+      const { encAmount, encPrice } = await encryptOrder(buyerClient, 100n, 5000n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, encAmount, encPrice)).wait();
 
-      // The stored amount is an encrypted euint64 handle, not plaintext 100
-      const encAmount = await blindBook.getOrderAmount(0);
-      expect(encAmount).to.not.equal(0); // it's a ciphertext handle
-
-      // In mock env, verify it was encrypted correctly
-      await hre.cofhe.mocks.expectPlaintext(encAmount, 100n);
+      const storedAmount = await blindBook.getOrderAmount(0);
+      expect(storedAmount).to.not.equal(0); // ciphertext handle
+      await hre.cofhe.mocks.expectPlaintext(storedAmount, 100n);
     });
   });
 
   describe("FHE Matching", function () {
     it("should match orders using FHE.lte, FHE.min, FHE.select", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 5000)).wait();
-      await (await blindBook.connect(seller).submitOrder(Side.SELL, 50, 4800)).wait();
+      const buy = await encryptOrder(buyerClient, 100n, 5000n);
+      const sell = await encryptOrder(sellerClient, 50n, 4800n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, buy.encAmount, buy.encPrice)).wait();
+      await (await blindBook.connect(seller).submitOrder(Side.SELL, sell.encAmount, sell.encPrice)).wait();
 
       await (await blindBook.matchOrders(0, 1)).wait();
 
-      // Fill qty should be min(100, 50) = 50, computed via FHE.min
       const fillQtyHash = await blindBook.getMatchFillQty(0);
       await hre.cofhe.mocks.expectPlaintext(fillQtyHash, 50n);
     });
 
     it("should match when prices are equal (FHE.lte)", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 5000)).wait();
-      await (await blindBook.connect(seller).submitOrder(Side.SELL, 50, 5000)).wait();
+      const buy = await encryptOrder(buyerClient, 100n, 5000n);
+      const sell = await encryptOrder(sellerClient, 50n, 5000n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, buy.encAmount, buy.encPrice)).wait();
+      await (await blindBook.connect(seller).submitOrder(Side.SELL, sell.encAmount, sell.encPrice)).wait();
 
       await (await blindBook.matchOrders(0, 1)).wait();
 
@@ -68,27 +78,28 @@ describe("BlindBook", function () {
     });
 
     it("should NOT match when sell price > buy price", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 3000)).wait();
-      await (await blindBook.connect(seller).submitOrder(Side.SELL, 50, 5000)).wait();
+      const buy = await encryptOrder(buyerClient, 100n, 3000n);
+      const sell = await encryptOrder(sellerClient, 50n, 5000n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, buy.encAmount, buy.encPrice)).wait();
+      await (await blindBook.connect(seller).submitOrder(Side.SELL, sell.encAmount, sell.encPrice)).wait();
 
       await (await blindBook.matchOrders(0, 1)).wait();
 
-      // FHE.select returns 0 when canMatch is false
       const fillQtyHash = await blindBook.getMatchFillQty(0);
       await hre.cofhe.mocks.expectPlaintext(fillQtyHash, 0n);
     });
 
     it("should compute remaining amounts via FHE.select and FHE.sub", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 5000)).wait();
-      await (await blindBook.connect(seller).submitOrder(Side.SELL, 50, 4800)).wait();
+      const buy = await encryptOrder(buyerClient, 100n, 5000n);
+      const sell = await encryptOrder(sellerClient, 50n, 4800n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, buy.encAmount, buy.encPrice)).wait();
+      await (await blindBook.connect(seller).submitOrder(Side.SELL, sell.encAmount, sell.encPrice)).wait();
 
       await (await blindBook.matchOrders(0, 1)).wait();
 
-      // Buy remaining: 100 - 50 = 50
       const buyRemaining = await blindBook.getOrderAmount(0);
       await hre.cofhe.mocks.expectPlaintext(buyRemaining, 50n);
 
-      // Sell remaining: 50 - 50 = 0
       const sellRemaining = await blindBook.getOrderAmount(1);
       await hre.cofhe.mocks.expectPlaintext(sellRemaining, 0n);
     });
@@ -96,8 +107,10 @@ describe("BlindBook", function () {
 
   describe("Reveal & Settlement", function () {
     it("should mark FILLED on successful reveal", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 5000)).wait();
-      await (await blindBook.connect(seller).submitOrder(Side.SELL, 50, 4800)).wait();
+      const buy = await encryptOrder(buyerClient, 100n, 5000n);
+      const sell = await encryptOrder(sellerClient, 50n, 4800n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, buy.encAmount, buy.encPrice)).wait();
+      await (await blindBook.connect(seller).submitOrder(Side.SELL, sell.encAmount, sell.encPrice)).wait();
       await (await blindBook.matchOrders(0, 1)).wait();
       await (await blindBook.revealFill(0, 50)).wait();
 
@@ -108,8 +121,10 @@ describe("BlindBook", function () {
     });
 
     it("should keep ACTIVE on zero-fill reveal", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 3000)).wait();
-      await (await blindBook.connect(seller).submitOrder(Side.SELL, 50, 5000)).wait();
+      const buy = await encryptOrder(buyerClient, 100n, 3000n);
+      const sell = await encryptOrder(sellerClient, 50n, 5000n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, buy.encAmount, buy.encPrice)).wait();
+      await (await blindBook.connect(seller).submitOrder(Side.SELL, sell.encAmount, sell.encPrice)).wait();
       await (await blindBook.matchOrders(0, 1)).wait();
       await (await blindBook.revealFill(0, 0)).wait();
 
@@ -120,15 +135,37 @@ describe("BlindBook", function () {
 
   describe("Cancellation", function () {
     it("should cancel own order", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 5000)).wait();
+      const { encAmount, encPrice } = await encryptOrder(buyerClient, 100n, 5000n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, encAmount, encPrice)).wait();
       await (await blindBook.connect(buyer).cancelOrder(0)).wait();
       const [, , status] = await blindBook.getOrderInfo(0);
       expect(status).to.equal(Status.CANCELLED);
     });
 
     it("should prevent others from cancelling", async function () {
-      await (await blindBook.connect(buyer).submitOrder(Side.BUY, 100, 5000)).wait();
+      const { encAmount, encPrice } = await encryptOrder(buyerClient, 100n, 5000n);
+      await (await blindBook.connect(buyer).submitOrder(Side.BUY, encAmount, encPrice)).wait();
       await expect(blindBook.connect(seller).cancelOrder(0)).to.be.revertedWith("Not your order");
+    });
+  });
+
+  describe("Calldata privacy", function () {
+    // Proof that plaintext values never appear in the transaction calldata.
+    // A front-runner scanning the mempool sees opaque ciphertext + proof, not "100" or "5000".
+    it("should not contain plaintext amount/price in calldata", async function () {
+      const amount = 12345n;
+      const price = 98765n;
+      const { encAmount, encPrice } = await encryptOrder(buyerClient, amount, price);
+
+      const iface = blindBook.interface;
+      const data: string = iface.encodeFunctionData("submitOrder", [Side.BUY, encAmount, encPrice]);
+
+      // Render the plaintext values as 32-byte hex words the way they would appear
+      // if submitted directly as uint64 arguments, and assert they do not appear.
+      const amountHex = amount.toString(16).padStart(64, "0");
+      const priceHex = price.toString(16).padStart(64, "0");
+      expect(data.toLowerCase()).to.not.include(amountHex);
+      expect(data.toLowerCase()).to.not.include(priceHex);
     });
   });
 });
